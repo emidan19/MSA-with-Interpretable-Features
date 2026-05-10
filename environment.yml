@@ -1,0 +1,15 @@
+name: codex_msa_features
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - librosa
+  - pysoundfile
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - pip
+  - pip:
+      - essentia
