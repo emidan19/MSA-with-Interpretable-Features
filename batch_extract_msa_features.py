@@ -16,6 +16,7 @@ from extract_msa_features import FeatureConfig, extract_all
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--audio-dir", type=Path, default=Path("data/rwc_p_20/audio"))
+    parser.add_argument("--sections-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("feature_outputs/rwc_p_20"))
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--sr", type=int, default=FeatureConfig.sr)
@@ -48,6 +49,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     cfg = FeatureConfig(
         sr=args.sr,
         hop_length=args.hop_length,
+        sections_dir=args.sections_dir,
         stm_coeffs=args.stm_coeffs,
         stm_window_s=args.stm_window_s,
         stm_hop_s=args.stm_hop_s,

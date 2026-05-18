@@ -49,6 +49,44 @@ import soundfile as sf
 from scipy.signal import detrend
 from sklearn.metrics.pairwise import cosine_similarity
 
+try:
+    import madmom as mm
+    from madmom.features import beats as bt
+    from madmom.features import downbeats as dbt
+    MADMOM_AVAILABLE = True
+except ImportError:
+    MADMOM_AVAILABLE = False
+
+try:
+    from beat_this.inference import File2Beats
+    BEAT_THIS_AVAILABLE = True
+except ImportError:
+    BEAT_THIS_AVAILABLE = False
+
+import tempfile
+
+
+def load_sections(sections_dir: Path | None, audio_id: str) -> list[tuple[float, float, str]]:
+    """Load section annotations from RWC-style .CHORUS.TXT file.
+    
+    Assumes annotations are in centiseconds (1/100 s).
+    """
+    if sections_dir is None:
+        return []
+    labels_path = sections_dir / f"{audio_id}.CHORUS.TXT"
+    if not labels_path.exists():
+        return []
+    sections = []
+    with open(labels_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) == 3:
+                start_cs, end_cs, label = parts
+                start_time = int(start_cs) / 100.0
+                end_time = int(end_cs) / 100.0
+                sections.append((start_time, end_time, label.strip('"')))
+    return sections
+
 
 @dataclass
 class FeatureConfig:
@@ -57,9 +95,12 @@ class FeatureConfig:
     n_fft: int = 2048
     n_mels: int = 40
     n_mfcc: int = 20
+    beat_tracking_method: str = "beat_this" # "librosa" | "beat_this" | "madmom"
+    beat_tracking_model_path: str | None = None
+    sections_dir: Path | None = None
     stm_window_s: float = 8.0
     stm_hop_s: float = 0.5
-    stm_min_beats: int = 3
+    stm_min_beats: int = 5
     stm_coeffs: int = 400
     f0_min_note: str = "C2"
     f0_max_note: str = "C7"
@@ -518,22 +559,69 @@ def extract_stm(
     return stm, stm_times, onset_env.astype(np.float32), effective_window_s
 
 
-def estimate_beats(y: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
-    _, beat_frames = librosa.beat.beat_track(
-        y=y,
-        sr=cfg.sr,
-        hop_length=cfg.hop_length,
-        trim=False,
-    )
-    beat_times = librosa.frames_to_time(beat_frames, sr=cfg.sr, hop_length=cfg.hop_length)
+def estimate_beats_and_downbeats(y: np.ndarray, cfg: FeatureConfig) -> tuple[np.ndarray, np.ndarray | None]:
+
+    method = cfg.beat_tracking_method.lower()
+
     duration = librosa.get_duration(y=y, sr=cfg.sr)
-    boundaries = np.unique(np.r_[0.0, beat_times, duration])
-    if len(boundaries) < 4:
-        boundaries = np.arange(0.0, duration + 1.0, 1.0)
-        if boundaries[-1] < duration:
-            boundaries = np.r_[boundaries, duration]
-    boundaries = regularize_beat_boundaries(boundaries, duration)
-    return boundaries.astype(np.float32)
+
+    if method == "librosa":
+        _, beat_frames = librosa.beat.beat_track(
+            y=y,
+            sr=cfg.sr,
+            hop_length=cfg.hop_length,
+            trim=False,
+        )
+    
+        beat_times = librosa.frames_to_time(beat_frames, sr=cfg.sr, hop_length=cfg.hop_length)
+
+        boundaries = np.unique(np.r_[0.0, beat_times, duration])
+        if len(boundaries) < 4:
+            boundaries = np.arange(0.0, duration + 1.0, 1.0)
+            if boundaries[-1] < duration:
+                boundaries = np.r_[boundaries, duration]
+        boundaries = regularize_beat_boundaries(boundaries, duration)
+        return boundaries.astype(np.float32), None
+
+    elif method == "madmom":
+        if not MADMOM_AVAILABLE:
+            raise ImportError("madmom not available")
+        # Beats
+        act_beats = bt.TCNBeatProcessor()(y)
+        proc_beats = bt.BeatTrackingProcessor(fps=100)
+        beat_times = proc_beats(act_beats)
+        beat_boundaries = np.unique(np.r_[0.0, beat_times, duration])
+        beat_boundaries = regularize_beat_boundaries(beat_boundaries, duration)
+        # Downbeats
+        act_downbeats = dbt.RNNDownBeatProcessor()(y)
+        proc_downbeats = dbt.DBNDownBeatTrackingProcessor(beats_per_bar=[3,4], fps=100)
+        song_beats = proc_downbeats(act_downbeats)
+        downbeat_times = [song_beats[0][0]]
+        for beat in song_beats[1:]:
+            if beat[1] == 1:
+                downbeat_times.append(beat[0])
+        downbeat_times.append(duration)
+        downbeat_boundaries = np.unique(np.r_[0.0, downbeat_times, duration])
+        downbeat_boundaries = regularize_beat_boundaries(downbeat_boundaries, duration)
+        return beat_boundaries.astype(np.float32), downbeat_boundaries.astype(np.float32)
+
+    elif method == "beat_this":
+        if not BEAT_THIS_AVAILABLE:
+            raise ImportError("beat_this not available")
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+            sf.write(f.name, y, cfg.sr)
+            file2beats = File2Beats(checkpoint_path="final0", device="cpu", dbn=False)
+            beats, downbeats = file2beats(f.name)
+        beat_times = np.array(beats)
+        downbeat_times = np.array(downbeats.tolist() + [beats[-1]])
+        beat_boundaries = np.unique(np.r_[0.0, beat_times, duration])
+        beat_boundaries = regularize_beat_boundaries(beat_boundaries, duration)
+        downbeat_boundaries = np.unique(np.r_[0.0, downbeat_times, duration])
+        downbeat_boundaries = regularize_beat_boundaries(downbeat_boundaries, duration)
+        return beat_boundaries.astype(np.float32), downbeat_boundaries.astype(np.float32)
+
+    else:
+        raise ValueError(f"Unknown beat tracking method: {method}")
 
 
 def regularize_beat_boundaries(boundaries: np.ndarray, duration: float) -> np.ndarray:
@@ -579,7 +667,7 @@ def make_demo_audio(path: Path, sr: int) -> None:
 
 
 def write_summary(path: Path, summary: dict) -> None:
-    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
 
 
 def save_preview(
@@ -588,21 +676,46 @@ def save_preview(
     y: np.ndarray,
     sr: int,
     beat_boundaries: np.ndarray,
+    downbeat_boundaries: np.ndarray | None,
+    sections: list[tuple[float, float, str]],
 ) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
     axes = axes.ravel()
 
     librosa.display.waveshow(y, sr=sr, ax=axes[0])
-    for boundary in beat_boundaries:
+    boundaries_to_show = downbeat_boundaries if downbeat_boundaries is not None else beat_boundaries
+    for boundary in boundaries_to_show:
         axes[0].axvline(boundary, color="k", alpha=0.08, linewidth=0.5)
-    axes[0].set_title("Audio and beat grid")
+    axes[0].set_title("Audio and downbeat grid" if downbeat_boundaries is not None else "Audio and beat grid")
+
+    # Fill sections
+    if sections:
+        colors = plt.cm.tab10(np.linspace(0, 1, len(sections)))
+        for i, (start, end, label) in enumerate(sections):
+            axes[0].axvspan(start, end, alpha=0.1, color=colors[i % len(colors)])
+            # Add label text
+            mid_time = (start + end) / 2
+            v_pos = ((0.95* len(sections)-i)/len(sections) - 0.5)
+            axes[0].text(mid_time, 2 * v_pos % 1 - 0.5, label, ha='center', va='top', fontsize=6, rotation=0, transform=axes[0].transData)
 
     for ax, (name, matrix) in zip(axes[1:], ssm_map.items()):
         if matrix.size:
             ax.imshow(matrix, origin="lower", aspect="auto", cmap="magma", vmin=-1, vmax=1)
         ax.set_title(f"SSM: {name}")
         ax.set_xlabel("beat interval")
-        ax.set_ylabel("beat interval")
+        ax.set_ylabel("section" if sections else "beat interval")
+        if sections:
+            ax.set_yticks([]) 
+        ax.tick_params(axis='both', labelsize=6)   
+
+        # Add section boundaries
+        for start, end, label in sections:
+            idx = max(0, np.searchsorted(beat_boundaries, start, side='left') - 1)
+            if idx < matrix.shape[0]:
+                ax.axvline(idx, color='green', linestyle='--', linewidth=1)
+                ax.axhline(idx, color='green', linestyle='--', linewidth=1)
+                # Label on vertical axis
+                ax.text(-0.5, idx, label, ha='right', va='center', fontsize=6, transform=ax.transData)
 
     for ax in axes[len(ssm_map) + 1 :]:
         ax.axis("off")
@@ -616,10 +729,15 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
     y, _ = librosa.load(audio_path, sr=cfg.sr, mono=True)
     duration = librosa.get_duration(y=y, sr=cfg.sr)
 
+    sections = load_sections(cfg.sections_dir, audio_path.stem)
+
+    print(audio_path.name)
+    print(cfg.sections_dir)
+
     mfcc, chroma, cens, frame_times = extract_mfcc_chroma_cens(y, cfg)
     orthogonal_features, orthogonal_diagnostics = extract_orthogonal_proxy_features(y, cfg, chroma, cens, frame_times)
     f0_features, f0_confidence, f0_times, f0_contour_features = extract_melodia(y, cfg)
-    beat_boundaries = estimate_beats(y, cfg)
+    beat_boundaries, downbeat_boundaries = estimate_beats_and_downbeats(y, cfg)
     stm, stm_times, onset_env, stm_effective_window_s = extract_stm(y, cfg, beat_boundaries)
 
     beat_mfcc = aggregate_by_intervals(mfcc, frame_times, beat_boundaries)
@@ -642,7 +760,7 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
     }
     for name, features in beat_orthogonal.items():
         ssm_map[name] = build_ssm(features)
-    fused = np.mean([m for m in ssm_map.values() if m.size], axis=0)
+    fused = np.mean([m for m in ssm_map.values() if m.size], axis=0) # TODO: CHANGE THIS HORRIBLE FUSION METHOD
     ssm_map["fused"] = fused.astype(np.float32)
 
     stem = audio_path.stem
@@ -673,6 +791,7 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
         f0_confidence=f0_confidence,
         f0_times=f0_times,
         beat_boundaries=beat_boundaries,
+        beat_downbeat_boundaries=downbeat_boundaries if downbeat_boundaries is not None else np.array([]),
         beat_stm=beat_stm,
         beat_mfcc=beat_mfcc,
         beat_chroma=beat_chroma,
@@ -697,7 +816,7 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
         ssm_fused=ssm_map["fused"],
     )
 
-    save_preview(preview_path, ssm_map, y, cfg.sr, beat_boundaries)
+    save_preview(preview_path, ssm_map, y, cfg.sr, beat_boundaries, downbeat_boundaries, sections)
 
     summary = {
         "audio_path": str(audio_path),
