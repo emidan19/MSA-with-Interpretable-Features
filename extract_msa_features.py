@@ -150,12 +150,14 @@ def build_section_ssm(
     if not sections or n_intervals == 0:
         return np.zeros((0, 0), dtype=np.float32)
 
+    unique_labels = sorted({label for _start, _end, label in sections})
+    label_to_id = {label: idx for idx, label in enumerate(unique_labels)}
     interval_labels = np.full(n_intervals, -1, dtype=np.int32)
     interval_centers = (beat_boundaries[:-1] + beat_boundaries[1:]) / 2.0
 
-    for section_idx, (start, end, _label) in enumerate(sections):
+    for start, end, label in sections:
         mask = (interval_centers >= start) & (interval_centers < end)
-        interval_labels[mask] = section_idx
+        interval_labels[mask] = label_to_id[label]
 
     valid = interval_labels[:, None] == interval_labels[None, :]
     assigned = (interval_labels[:, None] >= 0) & (interval_labels[None, :] >= 0)
