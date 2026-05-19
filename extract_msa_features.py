@@ -26,7 +26,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 # Keep runtime caches inside the project so sandboxed runs do not fail while
 # importing numba-backed librosa modules or building matplotlib font caches.
@@ -48,6 +48,7 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import detrend
 from sklearn.metrics.pairwise import cosine_similarity
+import yaml
 
 try:
     import madmom as mm
@@ -98,14 +99,27 @@ class FeatureConfig:
     beat_tracking_method: str = "beat_this" # "librosa" | "beat_this" | "madmom"
     beat_tracking_model_path: str | None = None
     sections_dir: Path | None = None
+    preview_features: tuple[str, ...] = ("stm", "cens", "sections")
+    preview_formats: tuple[str, ...] = ("png", "svg")
     stm_window_s: float = 8.0
     stm_hop_s: float = 0.5
     stm_min_beats: int = 5
     stm_coeffs: int = 400
-    f0_min_note: str = "C2"
-    f0_max_note: str = "C7"
-    f0_confidence_threshold: float = 0.15
-    f0_max_interp_gap_s: float = 1.5
+
+
+PREVIEW_FEATURE_ORDER = (
+    "stm",
+    "mfcc",
+    "chroma",
+    "cens",
+    "arrangement",
+    "vocal",
+    "bass",
+    "tonnetz",
+    "density",
+    "sections",
+    "fused",
+)
 
 
 def safe_nan_to_num(x: np.ndarray) -> np.ndarray:
@@ -125,6 +139,90 @@ def build_ssm(features: np.ndarray) -> np.ndarray:
         return np.zeros((0, 0), dtype=np.float32)
     x = zscore_columns(features).T
     return cosine_similarity(x).astype(np.float32)
+
+
+def build_section_ssm(
+    sections: list[tuple[float, float, str]],
+    beat_boundaries: np.ndarray,
+) -> np.ndarray:
+    """Return a beat-level binary reference SSM from annotated sections."""
+    n_intervals = max(0, len(beat_boundaries) - 1)
+    if not sections or n_intervals == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+
+    interval_labels = np.full(n_intervals, -1, dtype=np.int32)
+    interval_centers = (beat_boundaries[:-1] + beat_boundaries[1:]) / 2.0
+
+    for section_idx, (start, end, _label) in enumerate(sections):
+        mask = (interval_centers >= start) & (interval_centers < end)
+        interval_labels[mask] = section_idx
+
+    valid = interval_labels[:, None] == interval_labels[None, :]
+    assigned = (interval_labels[:, None] >= 0) & (interval_labels[None, :] >= 0)
+    return np.where(assigned, valid, False).astype(np.float32)
+
+
+def normalize_preview_features(features: Iterable[str] | None) -> tuple[str, ...]:
+    if not features:
+        return FeatureConfig.preview_features
+    normalized = []
+    for name in features:
+        key = str(name).strip().lower()
+        if key not in PREVIEW_FEATURE_ORDER:
+            raise ValueError(
+                f"Unknown preview feature: {name!r}. Valid options: {', '.join(PREVIEW_FEATURE_ORDER)}"
+            )
+        if key not in normalized:
+            normalized.append(key)
+    return tuple(normalized)
+
+
+def normalize_preview_formats(formats: Iterable[str] | None) -> tuple[str, ...]:
+    valid_formats = {"png", "svg"}
+    if not formats:
+        return FeatureConfig.preview_formats
+    normalized = []
+    for fmt in formats:
+        key = str(fmt).strip().lower()
+        if key not in valid_formats:
+            raise ValueError(f"Unknown preview format: {fmt!r}. Valid options: png, svg")
+        if key not in normalized:
+            normalized.append(key)
+    return tuple(normalized)
+
+
+def config_from_mapping(data: dict[str, Any]) -> FeatureConfig:
+    data = dict(data)
+    if "sections_dir" in data and data["sections_dir"] is not None:
+        data["sections_dir"] = Path(data["sections_dir"])
+    if "preview_features" in data:
+        data["preview_features"] = normalize_preview_features(data["preview_features"])
+    if "preview_formats" in data:
+        data["preview_formats"] = normalize_preview_formats(data["preview_formats"])
+    return FeatureConfig(**data)
+
+
+def load_yaml_config(path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"YAML config at {path} must contain a mapping at the top level.")
+    return payload
+
+
+def load_runtime_config(config_path: Path | None) -> tuple[dict[str, Any], FeatureConfig]:
+    raw = load_yaml_config(config_path) if config_path is not None else {}
+    feature_cfg = raw.get("feature_config", raw)
+    if not isinstance(feature_cfg, dict):
+        raise ValueError("`feature_config` must be a mapping when present in the YAML config.")
+    return raw, config_from_mapping(feature_cfg)
+
+
+def resolve_value(cli_value: Any, yaml_value: Any, default_value: Any) -> Any:
+    if cli_value is not None:
+        return cli_value
+    if yaml_value is not None:
+        return yaml_value
+    return default_value
 
 
 def aggregate_by_intervals(
@@ -670,16 +768,21 @@ def write_summary(path: Path, summary: dict) -> None:
     path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
 
 
-def save_preview(
-    output_path: Path,
+def save_previews(
+    output_paths: list[Path],
     ssm_map: dict[str, np.ndarray],
     y: np.ndarray,
     sr: int,
     beat_boundaries: np.ndarray,
     downbeat_boundaries: np.ndarray | None,
     sections: list[tuple[float, float, str]],
+    preview_features: tuple[str, ...],
 ) -> None:
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
+    preview_items = [(name, ssm_map[name]) for name in preview_features if name in ssm_map]
+    n_panels = len(preview_items) + 1
+    n_cols = 3
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 4 * n_rows), constrained_layout=True)
     axes = axes.ravel()
 
     librosa.display.waveshow(y, sr=sr, ax=axes[0])
@@ -689,16 +792,18 @@ def save_preview(
     axes[0].set_title("Audio and downbeat grid" if downbeat_boundaries is not None else "Audio and beat grid")
 
     # Fill sections
+    section_colors = plt.cm.tab10(np.linspace(0, 1, max(len(sections), 1)))
+
     if sections:
-        colors = plt.cm.tab10(np.linspace(0, 1, len(sections)))
         for i, (start, end, label) in enumerate(sections):
-            axes[0].axvspan(start, end, alpha=0.1, color=colors[i % len(colors)])
+            color = section_colors[i % len(section_colors)]
+            axes[0].axvspan(start, end, alpha=0.1, color=color)
             # Add label text
             mid_time = (start + end) / 2
             v_pos = ((0.95* len(sections)-i)/len(sections) - 0.5)
             axes[0].text(mid_time, 2 * v_pos % 1 - 0.5, label, ha='center', va='top', fontsize=6, rotation=0, transform=axes[0].transData)
 
-    for ax, (name, matrix) in zip(axes[1:], ssm_map.items()):
+    for ax, (name, matrix) in zip(axes[1:], preview_items):
         if matrix.size:
             ax.imshow(matrix, origin="lower", aspect="auto", cmap="magma", vmin=-1, vmax=1)
         ax.set_title(f"SSM: {name}")
@@ -709,18 +814,21 @@ def save_preview(
         ax.tick_params(axis='both', labelsize=6)   
 
         # Add section boundaries
-        for start, end, label in sections:
+        for i, (start, end, label) in enumerate(sections):
             idx = max(0, np.searchsorted(beat_boundaries, start, side='left') - 1)
             if idx < matrix.shape[0]:
-                ax.axvline(idx, color='green', linestyle='--', linewidth=1)
-                ax.axhline(idx, color='green', linestyle='--', linewidth=1)
+                color = section_colors[i % len(section_colors)]
+                ax.axvline(idx, color=color, linestyle='--', linewidth=1)
+                ax.axhline(idx, color=color, linestyle='--', linewidth=1)
                 # Label on vertical axis
                 ax.text(-0.5, idx, label, ha='right', va='center', fontsize=6, transform=ax.transData)
 
-    for ax in axes[len(ssm_map) + 1 :]:
+    for ax in axes[n_panels:]:
         ax.axis("off")
 
-    fig.savefig(output_path, dpi=160)
+    for output_path in output_paths:
+        save_kwargs = {"dpi": 160} if output_path.suffix.lower() == ".png" else {}
+        fig.savefig(output_path, **save_kwargs)
     plt.close(fig)
 
 
@@ -736,15 +844,12 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
 
     mfcc, chroma, cens, frame_times = extract_mfcc_chroma_cens(y, cfg)
     orthogonal_features, orthogonal_diagnostics = extract_orthogonal_proxy_features(y, cfg, chroma, cens, frame_times)
-    f0_features, f0_confidence, f0_times, f0_contour_features = extract_melodia(y, cfg)
     beat_boundaries, downbeat_boundaries = estimate_beats_and_downbeats(y, cfg)
     stm, stm_times, onset_env, stm_effective_window_s = extract_stm(y, cfg, beat_boundaries)
 
     beat_mfcc = aggregate_by_intervals(mfcc, frame_times, beat_boundaries)
     beat_chroma = aggregate_by_intervals(chroma, frame_times, beat_boundaries)
     beat_cens = aggregate_by_intervals(cens, frame_times, beat_boundaries)
-    beat_f0 = aggregate_by_intervals(f0_features, f0_times, beat_boundaries)
-    beat_f0_contour = aggregate_by_intervals(f0_contour_features, f0_times, beat_boundaries)
     beat_stm = aggregate_by_intervals(stm, stm_times, beat_boundaries)
     beat_orthogonal = {
         name: aggregate_by_intervals(features, frame_times, beat_boundaries)
@@ -756,16 +861,17 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
         "mfcc": build_ssm(beat_mfcc),
         "chroma": build_ssm(beat_chroma),
         "cens": build_ssm(beat_cens),
-        "f0": build_ssm(beat_f0_contour),
     }
     for name, features in beat_orthogonal.items():
         ssm_map[name] = build_ssm(features)
+    if sections:
+        ssm_map["sections"] = build_section_ssm(sections, beat_boundaries)
     fused = np.mean([m for m in ssm_map.values() if m.size], axis=0) # TODO: CHANGE THIS HORRIBLE FUSION METHOD
     ssm_map["fused"] = fused.astype(np.float32)
 
     stem = audio_path.stem
     npz_path = out_dir / f"{stem}_features.npz"
-    preview_path = out_dir / f"{stem}_preview.png"
+    preview_paths = [out_dir / f"{stem}_preview.{fmt}" for fmt in cfg.preview_formats]
     summary_path = out_dir / f"{stem}_summary.json"
 
     np.savez_compressed(
@@ -786,18 +892,12 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
         bass=orthogonal_features["bass"],
         tonnetz=orthogonal_features["tonnetz"],
         density=orthogonal_features["density"],
-        f0_features=f0_features,
-        f0_contour_features=f0_contour_features,
-        f0_confidence=f0_confidence,
-        f0_times=f0_times,
         beat_boundaries=beat_boundaries,
         beat_downbeat_boundaries=downbeat_boundaries if downbeat_boundaries is not None else np.array([]),
         beat_stm=beat_stm,
         beat_mfcc=beat_mfcc,
         beat_chroma=beat_chroma,
         beat_cens=beat_cens,
-        beat_f0=beat_f0,
-        beat_f0_contour=beat_f0_contour,
         beat_arrangement=beat_orthogonal["arrangement"],
         beat_vocal=beat_orthogonal["vocal"],
         beat_bass=beat_orthogonal["bass"],
@@ -807,16 +907,25 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
         ssm_mfcc=ssm_map["mfcc"],
         ssm_chroma=ssm_map["chroma"],
         ssm_cens=ssm_map["cens"],
-        ssm_f0=ssm_map["f0"],
         ssm_arrangement=ssm_map["arrangement"],
         ssm_vocal=ssm_map["vocal"],
         ssm_bass=ssm_map["bass"],
         ssm_tonnetz=ssm_map["tonnetz"],
         ssm_density=ssm_map["density"],
+        ssm_sections=ssm_map["sections"] if "sections" in ssm_map else np.zeros((0, 0), dtype=np.float32),
         ssm_fused=ssm_map["fused"],
     )
 
-    save_preview(preview_path, ssm_map, y, cfg.sr, beat_boundaries, downbeat_boundaries, sections)
+    save_previews(
+        preview_paths,
+        ssm_map,
+        y,
+        cfg.sr,
+        beat_boundaries,
+        downbeat_boundaries,
+        sections,
+        cfg.preview_features,
+    )
 
     summary = {
         "audio_path": str(audio_path),
@@ -824,7 +933,9 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
         "config": asdict(cfg),
         "outputs": {
             "features_npz": str(npz_path),
-            "preview_png": str(preview_path),
+            "preview_png": str(preview_paths[0]) if "png" in cfg.preview_formats else "",
+            "preview_svg": str(out_dir / f"{stem}_preview.svg") if "svg" in cfg.preview_formats else "",
+            "preview_files": [str(path) for path in preview_paths],
             "summary_json": str(summary_path),
         },
         "shapes": {
@@ -837,28 +948,21 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
             "bass": list(orthogonal_features["bass"].shape),
             "tonnetz": list(orthogonal_features["tonnetz"].shape),
             "density": list(orthogonal_features["density"].shape),
-            "f0_features": list(f0_features.shape),
-            "f0_contour_features": list(f0_contour_features.shape),
             "beat_stm": list(beat_stm.shape),
             "beat_mfcc": list(beat_mfcc.shape),
             "beat_chroma": list(beat_chroma.shape),
             "beat_cens": list(beat_cens.shape),
-            "beat_f0": list(beat_f0.shape),
-            "beat_f0_contour": list(beat_f0_contour.shape),
             "beat_arrangement": list(beat_orthogonal["arrangement"].shape),
             "beat_vocal": list(beat_orthogonal["vocal"].shape),
             "beat_bass": list(beat_orthogonal["bass"].shape),
             "beat_tonnetz": list(beat_orthogonal["tonnetz"].shape),
             "beat_density": list(beat_orthogonal["density"].shape),
+            "ssm_sections": list(ssm_map["sections"].shape) if "sections" in ssm_map else [0, 0],
             "ssm_fused": list(ssm_map["fused"].shape),
         },
         "diagnostics": {
             "beat_intervals": int(max(0, len(beat_boundaries) - 1)),
-            "melody_extractor": "essentia.standard.PredominantPitchMelodia",
-            "f0_voiced_ratio": float(np.mean(f0_features[2] > 0.5)),
-            "f0_mean_confidence": float(np.mean(f0_confidence)),
-            "f0_confidence_threshold": float(cfg.f0_confidence_threshold),
-            "f0_max_interp_gap_s": float(cfg.f0_max_interp_gap_s),
+            "section_annotations_loaded": bool(sections),
         },
     }
     summary["diagnostics"].update(orthogonal_diagnostics)
@@ -886,43 +990,71 @@ def extract_all(audio_path: Path, out_dir: Path, cfg: FeatureConfig) -> dict:
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audio", nargs="?", type=Path, help="Path to an audio file.")
-    parser.add_argument("--out-dir", type=Path, default=Path("feature_outputs"))
+    parser.add_argument("--config", type=Path, default=None, help="Path to a YAML config file.")
+    parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--demo", action="store_true", help="Generate and process a synthetic demo audio file.")
-    parser.add_argument("--sr", type=int, default=FeatureConfig.sr)
-    parser.add_argument("--hop-length", type=int, default=FeatureConfig.hop_length)
-    parser.add_argument("--stm-coeffs", type=int, default=FeatureConfig.stm_coeffs)
-    parser.add_argument("--stm-window-s", type=float, default=FeatureConfig.stm_window_s)
-    parser.add_argument("--stm-hop-s", type=float, default=FeatureConfig.stm_hop_s)
-    parser.add_argument("--stm-min-beats", type=int, default=FeatureConfig.stm_min_beats)
-    parser.add_argument("--f0-confidence-threshold", type=float, default=FeatureConfig.f0_confidence_threshold)
-    parser.add_argument("--f0-max-interp-gap-s", type=float, default=FeatureConfig.f0_max_interp_gap_s)
+    parser.add_argument("--sr", type=int, default=None)
+    parser.add_argument("--hop-length", type=int, default=None)
+    parser.add_argument(
+        "--beat-tracking-method",
+        choices=["librosa", "beat_this", "madmom"],
+        default=None,
+    )
+    parser.add_argument("--sections-dir", type=Path, default=None)
+    parser.add_argument("--stm-coeffs", type=int, default=None)
+    parser.add_argument("--stm-window-s", type=float, default=None)
+    parser.add_argument("--stm-hop-s", type=float, default=None)
+    parser.add_argument("--stm-min-beats", type=int, default=None)
+    parser.add_argument(
+        "--preview-features",
+        nargs="+",
+        default=None,
+        help=f"Subset of preview SSMs to render. Options: {', '.join(PREVIEW_FEATURE_ORDER)}",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
+    raw_config, yaml_cfg = load_runtime_config(args.config)
     cfg = FeatureConfig(
-        sr=args.sr,
-        hop_length=args.hop_length,
-        stm_coeffs=args.stm_coeffs,
-        stm_window_s=args.stm_window_s,
-        stm_hop_s=args.stm_hop_s,
-        stm_min_beats=args.stm_min_beats,
-        f0_confidence_threshold=args.f0_confidence_threshold,
-        f0_max_interp_gap_s=args.f0_max_interp_gap_s,
+        **{
+            **asdict(yaml_cfg),
+            "sr": resolve_value(args.sr, yaml_cfg.sr, FeatureConfig.sr),
+            "hop_length": resolve_value(args.hop_length, yaml_cfg.hop_length, FeatureConfig.hop_length),
+            "beat_tracking_method": resolve_value(
+                args.beat_tracking_method, yaml_cfg.beat_tracking_method, FeatureConfig.beat_tracking_method
+            ),
+            "sections_dir": resolve_value(args.sections_dir, yaml_cfg.sections_dir, FeatureConfig.sections_dir),
+            "preview_features": normalize_preview_features(args.preview_features)
+            if args.preview_features is not None
+            else yaml_cfg.preview_features,
+            "preview_formats": yaml_cfg.preview_formats,
+            "stm_coeffs": resolve_value(args.stm_coeffs, yaml_cfg.stm_coeffs, FeatureConfig.stm_coeffs),
+            "stm_window_s": resolve_value(args.stm_window_s, yaml_cfg.stm_window_s, FeatureConfig.stm_window_s),
+            "stm_hop_s": resolve_value(args.stm_hop_s, yaml_cfg.stm_hop_s, FeatureConfig.stm_hop_s),
+            "stm_min_beats": resolve_value(args.stm_min_beats, yaml_cfg.stm_min_beats, FeatureConfig.stm_min_beats),
+        }
     )
 
     audio_path = args.audio
+    if audio_path is None and "audio_path" in raw_config:
+        audio_path = Path(raw_config["audio_path"])
+    out_dir = args.out_dir
+    if out_dir is None and "out_dir" in raw_config:
+        out_dir = Path(raw_config["out_dir"])
+    if out_dir is None:
+        out_dir = Path("feature_outputs")
     if args.demo:
-        args.out_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = args.out_dir / "demo_aba_song.wav"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = out_dir / "demo_aba_song.wav"
         make_demo_audio(audio_path, cfg.sr)
     if audio_path is None:
         raise SystemExit("Provide an audio path, or pass --demo.")
     if not audio_path.exists():
         raise SystemExit(f"Audio file not found: {audio_path}")
 
-    summary = extract_all(audio_path, args.out_dir, cfg)
+    summary = extract_all(audio_path, out_dir, cfg)
     print(json.dumps(summary, indent=2))
     return 0
 

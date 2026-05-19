@@ -1,0 +1,53 @@
+# Template config for `extract_msa_features.py` and `batch_extract_msa_features.py`
+#
+# Usage:
+#   python extract_msa_features.py --config msa_feature_config.template.yaml
+#   python batch_extract_msa_features.py --config msa_feature_config.template.yaml
+#
+# Precedence:
+# 1. Explicit CLI arguments
+# 2. Values from this YAML file
+# 3. Built-in script defaults
+
+# Single-file mode only:
+audio_path: path/to/song.wav
+
+# Batch mode only:
+audio_dir: /home/emartinez/data/public/RWC-Music-Database/Popular-Music
+limit: 2
+
+# Shared output directory:
+out_dir: feature_outputs/example_run
+
+feature_config:
+  # Optional section annotation directory containing *.CHORUS.TXT files
+  sections_dir: /home/emartinez/data/public/RWC-Music-Database/Popular-Music/CHORUS
+
+  # Audio / feature extraction
+  sr: 16000
+  hop_length: 512
+
+  # Beat tracking: librosa | beat_this | madmom
+  beat_tracking_method: beat_this
+
+  # Preview rendering
+  # Available options:
+  #   stm, mfcc, chroma, cens, arrangement, vocal, bass, tonnetz, density, sections, fused
+  preview_features:
+    - stm
+    - cens
+    - mfcc
+    - sections
+    - fused
+
+
+  # Output preview image formats
+  preview_formats:
+    - png
+    - svg
+
+  # STM parameters
+  stm_coeffs: 400
+  stm_window_s: 8.0
+  stm_hop_s: 0.5
+  stm_min_beats: 5

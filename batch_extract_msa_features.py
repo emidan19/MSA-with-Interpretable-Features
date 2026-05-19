@@ -7,26 +7,38 @@ import argparse
 import csv
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
-from extract_msa_features import FeatureConfig, extract_all
+from extract_msa_features import (
+    FeatureConfig,
+    extract_all,
+    load_runtime_config,
+    normalize_preview_features,
+    resolve_value,
+)
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio-dir", type=Path, default=Path("data/rwc_p_20/audio"))
+    parser.add_argument("--config", type=Path, default=None, help="Path to a YAML config file.")
+    parser.add_argument("--audio-dir", type=Path, default=None)
     parser.add_argument("--sections-dir", type=Path, default=None)
-    parser.add_argument("--out-dir", type=Path, default=Path("feature_outputs/rwc_p_20"))
-    parser.add_argument("--limit", type=int, default=20)
-    parser.add_argument("--sr", type=int, default=FeatureConfig.sr)
-    parser.add_argument("--hop-length", type=int, default=FeatureConfig.hop_length)
-    parser.add_argument("--stm-coeffs", type=int, default=FeatureConfig.stm_coeffs)
-    parser.add_argument("--stm-window-s", type=float, default=FeatureConfig.stm_window_s)
-    parser.add_argument("--stm-hop-s", type=float, default=FeatureConfig.stm_hop_s)
-    parser.add_argument("--stm-min-beats", type=int, default=FeatureConfig.stm_min_beats)
-    parser.add_argument("--f0-confidence-threshold", type=float, default=FeatureConfig.f0_confidence_threshold)
-    parser.add_argument("--f0-max-interp-gap-s", type=float, default=FeatureConfig.f0_max_interp_gap_s)
+    parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--sr", type=int, default=None)
+    parser.add_argument("--hop-length", type=int, default=None)
+    parser.add_argument(
+        "--beat-tracking-method",
+        choices=["librosa", "beat_this", "madmom"],
+        default=None,
+    )
+    parser.add_argument("--stm-coeffs", type=int, default=None)
+    parser.add_argument("--stm-window-s", type=float, default=None)
+    parser.add_argument("--stm-hop-s", type=float, default=None)
+    parser.add_argument("--stm-min-beats", type=int, default=None)
+    parser.add_argument("--preview-features", nargs="+", default=None)
     return parser.parse_args(argv)
 
 
@@ -46,27 +58,48 @@ def write_index(out_dir: Path, rows: list[dict]) -> None:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
+    raw_config, yaml_cfg = load_runtime_config(args.config)
     cfg = FeatureConfig(
-        sr=args.sr,
-        hop_length=args.hop_length,
-        sections_dir=args.sections_dir,
-        stm_coeffs=args.stm_coeffs,
-        stm_window_s=args.stm_window_s,
-        stm_hop_s=args.stm_hop_s,
-        stm_min_beats=args.stm_min_beats,
-        f0_confidence_threshold=args.f0_confidence_threshold,
-        f0_max_interp_gap_s=args.f0_max_interp_gap_s,
+        **{
+            **asdict(yaml_cfg),
+            "sr": resolve_value(args.sr, yaml_cfg.sr, FeatureConfig.sr),
+            "hop_length": resolve_value(args.hop_length, yaml_cfg.hop_length, FeatureConfig.hop_length),
+            "beat_tracking_method": resolve_value(
+                args.beat_tracking_method, yaml_cfg.beat_tracking_method, FeatureConfig.beat_tracking_method
+            ),
+            "sections_dir": resolve_value(args.sections_dir, yaml_cfg.sections_dir, FeatureConfig.sections_dir),
+            "preview_features": normalize_preview_features(args.preview_features)
+            if args.preview_features is not None
+            else yaml_cfg.preview_features,
+            "preview_formats": yaml_cfg.preview_formats,
+            "stm_coeffs": resolve_value(args.stm_coeffs, yaml_cfg.stm_coeffs, FeatureConfig.stm_coeffs),
+            "stm_window_s": resolve_value(args.stm_window_s, yaml_cfg.stm_window_s, FeatureConfig.stm_window_s),
+            "stm_hop_s": resolve_value(args.stm_hop_s, yaml_cfg.stm_hop_s, FeatureConfig.stm_hop_s),
+            "stm_min_beats": resolve_value(args.stm_min_beats, yaml_cfg.stm_min_beats, FeatureConfig.stm_min_beats),
+        }
     )
-    audio_paths = sorted(args.audio_dir.glob("*.wav"))[: args.limit]
+    audio_dir = args.audio_dir
+    if audio_dir is None and "audio_dir" in raw_config:
+        audio_dir = Path(raw_config["audio_dir"])
+    if audio_dir is None:
+        audio_dir = Path("data/rwc_p_20/audio")
+    out_dir = args.out_dir
+    if out_dir is None and "out_dir" in raw_config:
+        out_dir = Path(raw_config["out_dir"])
+    if out_dir is None:
+        out_dir = Path("feature_outputs/rwc_p_20")
+    limit = args.limit if args.limit is not None else int(raw_config.get("limit", 20))
+
+    audio_paths = sorted(audio_dir.glob("*.wav"))[:limit]
     if not audio_paths:
-        raise SystemExit(f"No WAV files found in {args.audio_dir}")
+        raise SystemExit(f"No WAV files found in {audio_dir}")
 
     rows: list[dict] = []
     for idx, audio_path in enumerate(audio_paths, start=1):
         print(f"[{idx:02d}/{len(audio_paths):02d}] {audio_path.name}", flush=True)
         start = time.perf_counter()
         try:
-            summary = extract_all(audio_path, args.out_dir, cfg)
+            summary = extract_all(audio_path, out_dir, cfg)
             elapsed = time.perf_counter() - start
             rows.append(
                 {
@@ -80,10 +113,6 @@ def main(argv: Iterable[str] | None = None) -> int:
                     "stm_effective_window_s": round(summary["diagnostics"]["stm_effective_window_s"], 6),
                     "stm_min_estimated_beats_per_window": summary["diagnostics"]["stm_min_estimated_beats_per_window"],
                     "stm_median_estimated_beats_per_window": round(summary["diagnostics"]["stm_median_estimated_beats_per_window"], 6),
-                    "f0_voiced_ratio": round(summary["diagnostics"]["f0_voiced_ratio"], 6),
-                    "f0_mean_confidence": round(summary["diagnostics"]["f0_mean_confidence"], 6),
-                    "f0_confidence_threshold": round(summary["diagnostics"]["f0_confidence_threshold"], 6),
-                    "f0_max_interp_gap_s": round(summary["diagnostics"]["f0_max_interp_gap_s"], 6),
                     "arrangement_harmonic_ratio_mean": round(
                         summary["diagnostics"]["arrangement_harmonic_ratio_mean"], 6
                     ),
@@ -103,11 +132,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                     "bass_shape": "x".join(map(str, summary["shapes"]["bass"])),
                     "tonnetz_shape": "x".join(map(str, summary["shapes"]["tonnetz"])),
                     "density_shape": "x".join(map(str, summary["shapes"]["density"])),
-                    "f0_shape": "x".join(map(str, summary["shapes"]["f0_features"])),
-                    "f0_contour_shape": "x".join(map(str, summary["shapes"]["f0_contour_features"])),
                     "ssm_shape": "x".join(map(str, summary["shapes"]["ssm_fused"])),
                     "features_npz": summary["outputs"]["features_npz"],
                     "preview_png": summary["outputs"]["preview_png"],
+                    "preview_svg": summary["outputs"]["preview_svg"],
                     "summary_json": summary["outputs"]["summary_json"],
                 }
             )
@@ -121,9 +149,9 @@ def main(argv: Iterable[str] | None = None) -> int:
                     "error": repr(exc),
                 }
             )
-            write_index(args.out_dir, rows)
+            write_index(out_dir, rows)
             raise
-        write_index(args.out_dir, rows)
+        write_index(out_dir, rows)
 
     print(json.dumps(rows, indent=2))
     return 0
