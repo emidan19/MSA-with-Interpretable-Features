@@ -66,6 +66,27 @@ except ImportError:
 
 import tempfile
 
+# TODO: adapt for other datasets besides RWC-POP
+SECTION_LABEL_MAP = {
+    "bridge": "bridge",
+    "chorus": "chorus",
+    "ending": "ending",
+    "intro": "intro",
+    "nothing": "nothing",
+    "post-chorus": "post-chorus",
+    "pre-chorus": "pre-chorus",
+    "verse": "verse",
+}
+
+
+def normalize_section_label(label: str) -> str:
+    """Collapse RWC section variants such as 'verse A' into base labels."""
+    normalized = label.strip().strip('"').lower()
+    for prefix, grouped in SECTION_LABEL_MAP.items():
+        if normalized == prefix or normalized.startswith(f"{prefix} "):
+            return grouped
+    return normalized
+
 
 def load_sections(sections_dir: Path | None, audio_id: str) -> list[tuple[float, float, str]]:
     """Load section annotations from RWC-style .CHORUS.TXT file.
@@ -85,7 +106,7 @@ def load_sections(sections_dir: Path | None, audio_id: str) -> list[tuple[float,
                 start_cs, end_cs, label = parts
                 start_time = int(start_cs) / 100.0
                 end_time = int(end_cs) / 100.0
-                sections.append((start_time, end_time, label.strip('"')))
+                sections.append((start_time, end_time, normalize_section_label(label)))
     return sections
 
 
