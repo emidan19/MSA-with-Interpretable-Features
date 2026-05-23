@@ -1,58 +1,119 @@
-# MSA feature extraction prototype
+# MSA Feature Extraction Prototype
 
-Prototype for checking whether a downstream music structure analysis path is
-feasible with:
-
-- STM rhythm descriptors.
-- MFCC timbre/texture descriptors.
-- Chroma and CENS harmonic descriptors.
-- Predominant melody F0 using Essentia/MELODIA.
-- Beat-synchronous summaries.
-- Self-similarity matrices per descriptor and a simple fused SSM.
+Prototype for extracting interpretable and SSL-based features for music
+structure analysis, then converting them into beat-synchronous descriptors and
+self-similarity matrices.
 
 ## Environment
 
 The environment used in this workspace is:
 
 ```bash
-conda activate codex_msa_features
+conda activate msa_features
 ```
 
-To recreate it from scratch:
+To recreate it:
 
 ```bash
 conda env create -f environment.yml
-conda activate codex_msa_features
+conda activate msa_features
 ```
 
-## Smoke test
+## Modules
 
-The script can generate a synthetic A/B/A audio file and process it:
+- `data_loading.py`: loads YAML config, audio files, section annotations, and demo audio.
+- `beat_tracking.py`: estimates beats/downbeats and regularizes beat boundaries.
+- `feature_types.py`: computes descriptor streams and SSM-ready feature matrices, including SSL embeddings.
+  - _IMPORTANT NOTE:_ currently this code takes all the SSL models within the same folder as a "grandparent" directory. For example, if running the script: 
+  ```python 
+  python extract_msa_features.py
+  ``` 
+  make sure to have the SSL models repos ([MusicFM](https://github.com/minzwon/musicfm), [MuQ](https://github.com/tencent-ailab/MuQ/), [MATPAC](https://github.com/aurianworld/matpac/), or any other you want) at ``bash MSA-with-Interpretable-Features/../../SSL_models``
+- `pipeline.py`: orchestrates extraction, beat-synchronous aggregation, preview rendering, and output writing.
+
+## Config File
+
+The extraction scripts use `msa_feature_config.template.yaml`.
+
+Important fields:
+
+- `audio_path`: single-file mode.
+- `audio_dir`: batch mode.
+- `out_dir`: output directory for `.npz`, preview images, and summaries.
+- `feature_config.computing_features`: only these features are computed.
+- `feature_config.preview_features`: only these computed features are previewed.
+- `feature_config.beat_tracking_method`: `librosa`, `beat_this`, or `madmom`.
+
+Example feature section:
+
+```yaml
+feature_config:
+  computing_features:
+    - stm
+    - mfcc
+    - chroma
+    - matpac
+    - muq
+    - musicfm
+  preview_features:
+    - stm
+    - mfcc
+    - chroma
+    - matpac
+```
+
+## Usage
+
+Single-file extraction with config:
+
+```bash
+python extract_msa_features.py --config msa_feature_config.template.yaml
+```
+
+Single-file extraction with an explicit audio path:
+
+```bash
+python extract_msa_features.py path/to/song.wav --config msa_feature_config.template.yaml
+```
+
+Batch extraction with config:
+
+```bash
+python batch_extract_msa_features.py --config msa_feature_config.template.yaml
+```
+
+The internal orchestration happens through `pipeline.py`, while
+`extract_msa_features.py` and `batch_extract_msa_features.py` are the public
+CLI entrypoints.
+
+## Smoke Test
+
+Generate a synthetic A/B/A example:
 
 ```bash
 python extract_msa_features.py --demo --out-dir feature_outputs
 ```
 
-This writes:
+This writes files such as:
 
 - `feature_outputs/demo_aba_song.wav`
 - `feature_outputs/demo_aba_song_features.npz`
 - `feature_outputs/demo_aba_song_summary.json`
 - `feature_outputs/demo_aba_song_preview.png`
 
-## Real audio
+## Outputs
 
-```bash
-python extract_msa_features.py path/to/song.wav --out-dir feature_outputs
-```
+Each run can produce:
 
-The `.npz` contains raw frame-level features, beat-synchronous features and
-SSMs. The preview image is meant only as a quick sanity check before building a
-proper segmentation/evaluation pipeline.
+- raw feature arrays for the requested features
+- beat-synchronous feature arrays
+- SSMs for the requested computed features
+- preview images for the requested preview features
+- a JSON summary with shapes, diagnostics, and output paths
 
-## Downstream structure baseline
+## Downstream Structure Baseline
 
-Run the current unsupervised downstream benchmark on the 20-track RWC-P pilot:
+Run the current unsupervised downstream benchmark on extracted features:
 
 ```bash
 /Users/pcancela/miniforge3/envs/emilio_msa_features/bin/python run_structure_baseline.py \
@@ -62,42 +123,4 @@ Run the current unsupervised downstream benchmark on the 20-track RWC-P pilot:
   --limit 20 \
   --plot-experiment E11_anchor_mfcc_multiscale \
   --ranked-track-figures 3
-```
-
-Useful scale-up flags:
-
-- `--feature-glob "*_features.npz"` selects feature files.
-- `--track-regex "RWC_P0(1|2)"` filters tracks by filename.
-- `--experiments E1_mfcc,E11_anchor_mfcc_multiscale` runs a subset.
-- `--experiments E17_learned_ssm_loo` runs a supervised leave-one-out SSM
-  fusion baseline.
-- `--experiments E18_product_mfcc_cens,E19_product_stm_mfcc_cens` runs
-  non-linear geometric SSM fusion checks.
-- `--experiments E20_poly_mfcc_cens,E21_poly_stm_mfcc_cens` runs polynomial
-  SSM fusion checks with individual terms and pairwise products.
-- `--learned-weight-step 0.1` controls the supervised SSM weight grid.
-- `--ranked-track-figures 3` writes plots only for the top/bottom tracks.
-- `--skip-dashboard` avoids global plots for quick smoke tests.
-
-Main outputs:
-
-- `experiment_metrics.csv`: one row per track and experiment.
-- `aggregate_metrics.csv`: average metrics by experiment.
-- `best_experiment_by_track.csv`: strongest experiment for each track.
-- `learned_ssm_loo_weights.csv`: fold-specific weights for supervised SSM
-  fusion when `E17_learned_ssm_loo` is run.
-- `run_manifest.json`: reproducibility metadata for the run.
-- `figures/`: dashboard and selected infographics.
-
-Example supervised SSM run:
-
-```bash
-/Users/pcancela/miniforge3/envs/emilio_msa_features/bin/python run_structure_baseline.py \
-  --features-dir feature_outputs/rwc_p_20 \
-  --annotation-dir data/rwc-annotations-archive \
-  --out-dir structure_outputs/rwc_p_20_supervised_ssm \
-  --limit 20 \
-  --experiments E1_mfcc,E3_content,E6_stm_content,E8_adaptive_stm_content,E10_mfcc_multiscale,E11_anchor_mfcc_multiscale,E13_anchor_dense,E17_learned_ssm_loo \
-  --plot-experiment E17_learned_ssm_loo \
-  --ranked-track-figures 2
 ```

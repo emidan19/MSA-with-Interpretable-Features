@@ -27,8 +27,11 @@ try:
     from beat_this.inference import File2Beats
 
     BEAT_THIS_AVAILABLE = True
-except ImportError:
+    BEAT_THIS_IMPORT_ERROR: Exception | None = None
+except Exception as exc:
+    File2Beats = None
     BEAT_THIS_AVAILABLE = False
+    BEAT_THIS_IMPORT_ERROR = exc
 
 
 def safe_nan_to_num(x: np.ndarray) -> np.ndarray:
@@ -93,7 +96,10 @@ def estimate_beats_and_downbeats(y: np.ndarray, cfg: FeatureConfig) -> tuple[np.
 
     if method == "beat_this":
         if not BEAT_THIS_AVAILABLE:
-            raise ImportError("beat_this not available")
+            raise ImportError(
+                "beat_this is not available in this environment. "
+                f"Original import error: {BEAT_THIS_IMPORT_ERROR!r}"
+            )
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             sf.write(handle.name, y, cfg.sr)
             file2beats = File2Beats(

@@ -1,16 +1,29 @@
-name: codex_msa_features
+name: msa_features
 channels:
   - conda-forge
+  - pytorch
 dependencies:
   - python=3.11
-  - numpy
+  - tqdm
+  - numpy>=1.26.4,<2.0
   - scipy
   - librosa
   - pysoundfile
   - pandas
   - matplotlib
   - scikit-learn
+  - pytorch=2.4.1
+  - torchaudio=2.4.1
+  - torchvision=0.19.1
+  - cpuonly
+  - einops
+  - easydict
   - pip
   - pip:
       - essentia
       - beat-this
+      - transformers<5
+      - timm
+      - nnAudio
+      - x_clip
+      - muq
