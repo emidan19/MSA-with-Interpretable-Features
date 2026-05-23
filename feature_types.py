@@ -257,6 +257,74 @@ def extract_orthogonal_proxy_features(
     }
     return features, diagnostics
 
+def extract_ssl_features(audio_path: str, cfg: FeatureConfig, feature_names: set[str]) -> dict[str, np.ndarray]:
+    requested = feature_names & {"musicfm", "muq", "matpac"}
+    if not requested:
+        return {}
+
+    try:
+        import os
+        import sys
+        import torch
+        import torchaudio
+    except ImportError as exc:
+        raise RuntimeError("Torch and torchaudio are required for SSL feature extraction.") from exc
+
+    ssl_root = cfg.ssl_models_root
+    if str(ssl_root / "matpac" / "inference_matpac") not in sys.path:
+        sys.path.insert(0, str(ssl_root / "matpac" / "inference_matpac"))
+    if str(ssl_root / "MuQ" / "src") not in sys.path:
+        sys.path.insert(0, str(ssl_root / "MuQ" / "src"))
+    if str(ssl_root.parent) not in sys.path:
+        sys.path.insert(0, str(ssl_root.parent))
+
+    waveform, sample_rate = torchaudio.load(audio_path)
+    waveform = waveform.mean(dim=0, keepdim=True)
+    outputs: dict[str, np.ndarray] = {}
+    device = torch.device(cfg.ssl_device)
+
+    def _resample_if_needed(target_sr: int) -> torch.Tensor:
+        if sample_rate == target_sr:
+            return waveform
+        return torchaudio.functional.resample(waveform, sample_rate, target_sr)
+
+    with torch.no_grad():
+        if "musicfm" in requested:
+            sys.path.insert(0, str(cfg.ssl_models_root))
+            from musicfm.model.musicfm_25hz import MusicFM25Hz
+
+            wav_24k = _resample_if_needed(24000).to(device)
+            musicfm = MusicFM25Hz(
+                is_flash=False,
+                stat_path=os.fspath(cfg.musicfm_stat_path),
+                model_path=os.fspath(cfg.musicfm_model_path),
+            ).to(device)
+            musicfm.eval()
+            emb = musicfm.get_latent(wav_24k, layer_ix=7)
+            outputs["musicfm"] = emb.squeeze(0).detach().cpu().numpy().T.astype(np.float32)
+
+        if "muq" in requested:
+            from muq import MuQ
+
+            wav_24k = _resample_if_needed(24000).to(device)
+            muq = MuQ.from_pretrained(cfg.muq_model_name).to(device).eval()
+            emb = muq(wav_24k, output_hidden_states=True)
+            outputs["muq"] = emb.last_hidden_state.squeeze(0).detach().cpu().numpy().T.astype(np.float32)
+
+        if "matpac" in requested:
+            from matpac.model import get_matpac
+
+            wav_16k = _resample_if_needed(16000).to(device)
+            matpac = get_matpac(
+                checkpoint_path=os.fspath(cfg.matpac_checkpoint_path),
+                pull_time_dimension=False,
+                inference_type="fast",
+            ).to(device).eval()
+            emb, _layer_results = matpac(wav_16k)
+            outputs["matpac"] = emb.squeeze(0).detach().cpu().numpy().T.astype(np.float32)
+
+    return outputs
+
 def correct_octave_jumps(midi: np.ndarray, valid: np.ndarray) -> np.ndarray:
     corrected = midi.copy()
     previous = np.nan

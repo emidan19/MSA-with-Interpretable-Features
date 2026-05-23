@@ -39,6 +39,10 @@ feature_config:
     - chroma
     - mfcc
     - sections
+    - matpac
+    - muq
+    - musicfm
+
   # Preview rendering
   # Available options:
   #   stm, mfcc, chroma, cens, arrangement, vocal, bass, tonnetz, density, sections, fused
@@ -48,7 +52,9 @@ feature_config:
     - chroma
     - mfcc
     - sections
-    - fused
+    - matpac
+    - muq
+    - musicfm
 
 
   # Output preview image formats

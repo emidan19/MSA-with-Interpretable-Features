@@ -50,6 +50,33 @@ class FeatureConfig:
     f0_max_note: str = "C7"
     f0_confidence_threshold: float = 0.2
     f0_max_interp_gap_s: float = 0.25
+    ssl_models_root: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "SSL_models"
+    )
+    matpac_checkpoint_path: Path | None = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "SSL_models"
+        / "matpac"
+        / "ckpts_folder"
+        / "matpac_10_2048.pt"
+    )
+    musicfm_stat_path: Path | None = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "SSL_models"
+        / "musicfm"
+        / "data"
+        / "msd_stats.json"
+    )
+    musicfm_model_path: Path | None = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "SSL_models"
+        / "musicfm"
+        / "data"
+        / "pretrained_msd.pt"
+    )
+    muq_model_name: str = "OpenMuQ/MuQ-large-msd-iter"
+    ssl_device: str = "cpu"
+
 
 FEATURE_NAME_ORDER = (
     "stm",
@@ -61,6 +88,9 @@ FEATURE_NAME_ORDER = (
     "bass",
     "tonnetz",
     "density",
+    "musicfm",
+    "muq",
+    "matpac",
     "sections",
     "fused",
 )
@@ -139,8 +169,11 @@ def config_from_mapping(data: dict[str, Any]) -> FeatureConfig:
     payload = dict(data)
     for path_key in (
         "sections_dir",
-        # TODO: extend for ssl models config paths
-        ):
+        "ssl_models_root",
+        "matpac_checkpoint_path",
+        "musicfm_stat_path",
+        "musicfm_model_path",
+    ):
         if path_key in payload and payload[path_key] is not None:
             payload[path_key] = Path(payload[path_key])
     if "computing_features" in payload:
