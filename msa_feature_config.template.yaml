@@ -14,7 +14,7 @@ audio_path: path/to/song.wav
 
 # Batch mode only:
 audio_dir: /home/emartinez/data/public/RWC-Music-Database/Popular-Music
-limit: 2
+limit: 100
 
 # Shared output directory:
 out_dir: feature_outputs/example_run
@@ -30,12 +30,22 @@ feature_config:
   # Beat tracking: librosa | beat_this | madmom
   beat_tracking_method: beat_this
 
+  # Computing features
+  # Available options:
+  #   stm, mfcc, chroma, cens, arrangement, vocal, bass, tonnetz, density, sections, fused
+  computing_features:
+    - stm
+    - cens
+    - chroma
+    - mfcc
+    - sections
   # Preview rendering
   # Available options:
   #   stm, mfcc, chroma, cens, arrangement, vocal, bass, tonnetz, density, sections, fused
   preview_features:
     - stm
     - cens
+    - chroma
     - mfcc
     - sections
     - fused

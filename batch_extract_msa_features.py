@@ -11,13 +11,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
-from extract_msa_features import (
+from data_loading import (
     FeatureConfig,
-    extract_all,
     load_runtime_config,
+    normalize_computing_features,
     normalize_preview_features,
     resolve_value,
 )
+from pipeline import extract_all
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -56,6 +57,13 @@ def write_index(out_dir: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def shape_str(summary: dict, key: str) -> str:
+    shape = summary.get("shapes", {}).get(key)
+    if not shape:
+        return ""
+    return "x".join(map(str, shape))
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     raw_config, yaml_cfg = load_runtime_config(args.config)
@@ -68,6 +76,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 args.beat_tracking_method, yaml_cfg.beat_tracking_method, FeatureConfig.beat_tracking_method
             ),
             "sections_dir": resolve_value(args.sections_dir, yaml_cfg.sections_dir, FeatureConfig.sections_dir),
+            "computing_features": normalize_computing_features(yaml_cfg.computing_features),
             "preview_features": normalize_preview_features(args.preview_features)
             if args.preview_features is not None
             else yaml_cfg.preview_features,
@@ -101,38 +110,37 @@ def main(argv: Iterable[str] | None = None) -> int:
         try:
             summary = extract_all(audio_path, out_dir, cfg)
             elapsed = time.perf_counter() - start
+            diagnostics = summary.get("diagnostics", {})
             rows.append(
                 {
                     "audio": audio_path.name,
                     "status": "ok",
                     "elapsed_s": round(elapsed, 3),
                     "duration_s": round(summary["duration_s"], 3),
-                    "beat_intervals": summary["diagnostics"]["beat_intervals"],
-                    "beat_median_interval_s": round(summary["diagnostics"]["beat_median_interval_s"], 6),
-                    "beat_max_interval_s": round(summary["diagnostics"]["beat_max_interval_s"], 6),
-                    "stm_effective_window_s": round(summary["diagnostics"]["stm_effective_window_s"], 6),
-                    "stm_min_estimated_beats_per_window": summary["diagnostics"]["stm_min_estimated_beats_per_window"],
-                    "stm_median_estimated_beats_per_window": round(summary["diagnostics"]["stm_median_estimated_beats_per_window"], 6),
-                    "arrangement_harmonic_ratio_mean": round(
-                        summary["diagnostics"]["arrangement_harmonic_ratio_mean"], 6
+                    "beat_intervals": diagnostics.get("beat_intervals", 0),
+                    "beat_median_interval_s": round(diagnostics.get("beat_median_interval_s", 0.0), 6),
+                    "beat_max_interval_s": round(diagnostics.get("beat_max_interval_s", 0.0), 6),
+                    "stm_effective_window_s": round(diagnostics.get("stm_effective_window_s", 0.0), 6),
+                    "stm_min_estimated_beats_per_window": diagnostics.get("stm_min_estimated_beats_per_window", 0),
+                    "stm_median_estimated_beats_per_window": round(
+                        diagnostics.get("stm_median_estimated_beats_per_window", 0.0), 6
                     ),
-                    "arrangement_percussive_ratio_mean": round(
-                        summary["diagnostics"]["arrangement_percussive_ratio_mean"], 6
-                    ),
-                    "vocal_proxy_mean": round(summary["diagnostics"]["vocal_proxy_mean"], 6),
-                    "bass_fraction_mean": round(summary["diagnostics"]["bass_fraction_mean"], 6),
-                    "density_onset_mean": round(summary["diagnostics"]["density_onset_mean"], 6),
-                    "tonnetz_hcdf_mean": round(summary["diagnostics"]["tonnetz_hcdf_mean"], 6),
-                    "stm_shape": "x".join(map(str, summary["shapes"]["stm"])),
-                    "mfcc_shape": "x".join(map(str, summary["shapes"]["mfcc"])),
-                    "chroma_shape": "x".join(map(str, summary["shapes"]["chroma"])),
-                    "cens_shape": "x".join(map(str, summary["shapes"]["cens"])),
-                    "arrangement_shape": "x".join(map(str, summary["shapes"]["arrangement"])),
-                    "vocal_shape": "x".join(map(str, summary["shapes"]["vocal"])),
-                    "bass_shape": "x".join(map(str, summary["shapes"]["bass"])),
-                    "tonnetz_shape": "x".join(map(str, summary["shapes"]["tonnetz"])),
-                    "density_shape": "x".join(map(str, summary["shapes"]["density"])),
-                    "ssm_shape": "x".join(map(str, summary["shapes"]["ssm_fused"])),
+                    "arrangement_harmonic_ratio_mean": round(diagnostics.get("arrangement_harmonic_ratio_mean", 0.0), 6),
+                    "arrangement_percussive_ratio_mean": round(diagnostics.get("arrangement_percussive_ratio_mean", 0.0), 6),
+                    "vocal_proxy_mean": round(diagnostics.get("vocal_proxy_mean", 0.0), 6),
+                    "bass_fraction_mean": round(diagnostics.get("bass_fraction_mean", 0.0), 6),
+                    "density_onset_mean": round(diagnostics.get("density_onset_mean", 0.0), 6),
+                    "tonnetz_hcdf_mean": round(diagnostics.get("tonnetz_hcdf_mean", 0.0), 6),
+                    "stm_shape": shape_str(summary, "stm"),
+                    "mfcc_shape": shape_str(summary, "mfcc"),
+                    "chroma_shape": shape_str(summary, "chroma"),
+                    "cens_shape": shape_str(summary, "cens"),
+                    "arrangement_shape": shape_str(summary, "arrangement"),
+                    "vocal_shape": shape_str(summary, "vocal"),
+                    "bass_shape": shape_str(summary, "bass"),
+                    "tonnetz_shape": shape_str(summary, "tonnetz"),
+                    "density_shape": shape_str(summary, "density"),
+                    "ssm_shape": shape_str(summary, "ssm_fused"),
                     "features_npz": summary["outputs"]["features_npz"],
                     "preview_png": summary["outputs"]["preview_png"],
                     "preview_svg": summary["outputs"]["preview_svg"],
